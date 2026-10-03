@@ -129,7 +129,11 @@ Hào quang thần thánh rực rỡ lập tức bao phủ phạm vi trăm trư�
 Tên thủ lĩnh áo đen kinh hoàng tột độ, thế nhưng còn chưa kịp gượng dậy, một đường kiếm quang chói mắt đã xé toạc màn đêm mưa gió.
 Thần ngọc dung hợp vào cơ thể Lâm Vân, kinh mạch tái sinh, một luồng long hồn chi lực vô cùng vô tận điên cuồng thức tỉnh trong đan điền hắn!`;
 
-export const ChapterAlignmentView: React.FC = () => {
+interface ChapterAlignmentViewProps {
+  isActive?: boolean;
+}
+
+export const ChapterAlignmentView: React.FC<ChapterAlignmentViewProps> = ({ isActive = true }) => {
   const [rawText, setRawText] = useState<string>(() => {
     try { return localStorage.getItem('align_raw_text') || ''; } catch { return ''; }
   });
@@ -158,6 +162,13 @@ export const ChapterAlignmentView: React.FC = () => {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [activeParaHover, setActiveParaHover] = useState<number | null>(null);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  // Auto-exit fullscreen if user switches away to another tab
+  useEffect(() => {
+    if (!isActive && isFullscreen) {
+      setIsFullscreen(false);
+    }
+  }, [isActive, isFullscreen]);
 
   // Auto-save draft to localStorage whenever content or state changes
   useEffect(() => {

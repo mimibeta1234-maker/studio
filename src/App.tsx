@@ -24,11 +24,11 @@ export default function App() {
   // Authentication gate
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => isUserAuthenticated());
 
-  // Studio navigation tab: 'downloader' | 'qimao' | 'align'
+  // Studio navigation tab: 'downloader' | 'qimao' | 'align' | 'compare'
   const [activeTab, setActiveTab] = useState<StudioTab>(() => {
     try {
       const saved = localStorage.getItem('fanqie_active_tab') as StudioTab;
-      if (saved && ['downloader', 'qimao', 'align'].includes(saved)) {
+      if (saved && ['downloader', 'qimao', 'align', 'compare'].includes(saved)) {
         return saved;
       }
     } catch (e) {}
@@ -446,9 +446,12 @@ export default function App() {
             onClearInitialBookId={() => setQimaoTargetBookId(null)}
             onSavedBooksUpdate={() => setSavedBooks(getSavedBooks())}
           />
-        ) : (
+        ) : activeTab === 'align' ? (
           /* Multi-Chapter Raw - Translation Alignment View */
-          <ChapterAlignmentView />
+          <ChapterAlignmentView isActive={activeTab === 'align'} />
+        ) : (
+          /* Compare Tool View */
+          <CompareView />
         )}
       </main>
 
