@@ -517,6 +517,7 @@ export default function App() {
         initialCoverUrl={currentBook?.thumb_url}
         initialBookName={currentBook?.book_name}
         initialAuthor={currentBook?.author}
+        initialBookId={currentBook?.book_id}
       />
 
       {/* Chapter Titles Extraction Modal */}

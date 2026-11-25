@@ -1608,17 +1608,21 @@ export async function searchBooks(query, count = 10) {
 
 export function parseFanqieCoverFromUrl(rawUrl: string): { folder: string; hash: string; rawUrl?: string; queryStr?: string; host?: string } | null {
   if (!rawUrl || typeof rawUrl !== 'string') return null;
-  const decoded = decodeURIComponent(rawUrl.trim());
+  const trimmed = rawUrl.trim();
 
-  // Extract query string if any (?lk3s=...&x-expires=...&x-signature=... or ?w=1080&h=1440)
-  const qIdx = decoded.indexOf('?');
-  const queryStr = qIdx !== -1 ? decoded.slice(qIdx) : '';
-  const cleanPath = qIdx !== -1 ? decoded.slice(0, qIdx) : decoded;
+  // Preserve exact query string (crucial for signed URLs with %2F, %3D, %2B in x-signature)
+  const qIdx = trimmed.indexOf('?');
+  const queryStr = qIdx !== -1 ? trimmed.slice(qIdx) : '';
+  const rawPath = qIdx !== -1 ? trimmed.slice(0, qIdx) : trimmed;
+  let cleanPath = rawPath;
+  try {
+    cleanPath = decodeURIComponent(rawPath);
+  } catch (e) {}
 
   let host = '';
   try {
-    if (decoded.startsWith('http')) {
-      const u = new URL(decoded);
+    if (trimmed.startsWith('http')) {
+      const u = new URL(trimmed);
       host = u.host;
     }
   } catch (e) {}
@@ -1628,30 +1632,30 @@ export function parseFanqieCoverFromUrl(rawUrl: string): { folder: string; hash:
   if (folderMatch) {
     const rawHash = folderMatch[2].split('~')[0].split('.')[0];
     if (rawHash.length >= 20 && rawHash.length <= 40) {
-      return { folder: folderMatch[1], hash: rawHash, rawUrl: decoded.startsWith('http') ? decoded : undefined, queryStr, host };
+      return { folder: folderMatch[1], hash: rawHash, rawUrl: trimmed.startsWith('http') ? trimmed : undefined, queryStr, host };
     }
   }
 
   // 2. Match standalone 32-character hexadecimal or p2o alphanumeric hash
   const hashMatch = cleanPath.match(/\b([a-f0-9]{32}|p2o[a-z0-9]{29})\b/i);
   if (hashMatch) {
-    return { folder: 'novel-pic-r', hash: hashMatch[1], rawUrl: decoded.startsWith('http') ? decoded : undefined, queryStr, host };
+    return { folder: 'novel-pic-r', hash: hashMatch[1], rawUrl: trimmed.startsWith('http') ? trimmed : undefined, queryStr, host };
   }
 
   // 3. For Qimao or other general image URLs
-  if (decoded.startsWith('http') && (decoded.includes('qimao') || decoded.match(/\.(jpg|jpeg|png|webp|image)/i))) {
-    return { folder: 'qimao', hash: 'direct', rawUrl: decoded, queryStr, host };
+  if (trimmed.startsWith('http') && (trimmed.includes('qimao') || trimmed.match(/\.(jpg|jpeg|png|webp|image)/i))) {
+    return { folder: 'qimao', hash: 'direct', rawUrl: trimmed, queryStr, host };
   }
 
   return null;
 }
 
 export function buildHdCoverUrls(folder: string, hash: string, rawUrl?: string, queryStr?: string) {
-  const qs = queryStr ? (queryStr.startsWith('?') ? queryStr : `?${queryStr}`) : '';
+  const isSignedQuery = Boolean(queryStr && /x-signature=|lk3s=/i.test(queryStr));
+  const qs = queryStr && !isSignedQuery ? (queryStr.startsWith('?') ? queryStr : `?${queryStr}`) : '';
 
   // If this is a direct Qimao or external image URL
   if (folder === 'qimao' && rawUrl) {
-    // Qimao high-res transforms (remove resizing filters if any)
     const cleanQimao = rawUrl.split('?')[0];
     return {
       originalUrl: cleanQimao,
@@ -1662,35 +1666,36 @@ export function buildHdCoverUrls(folder: string, hash: string, rawUrl?: string, 
     };
   }
 
-  // If rawUrl is a signed CDN URL (e.g. reading-sign.fqnovelpic.com with x-signature), modify the template path while preserving valid signature!
-  let signedOriginal = '';
-  let signed2k = '';
-  let signed1200 = '';
-
-  if (rawUrl && rawUrl.includes('reading-sign.fqnovelpic.com')) {
-    if (rawUrl.includes('~tplv-resize:')) {
-      signed2k = rawUrl.replace(/~tplv-resize:[^?]+/, '~tplv-resize:1600:0.image');
-      signed1200 = rawUrl.replace(/~tplv-resize:[^?]+/, '~tplv-resize:1200:0.image');
-      signedOriginal = rawUrl.replace(/~tplv-resize:[^?]+/, '~noop.image');
-    } else {
-      signed2k = rawUrl;
-      signed1200 = rawUrl;
-      signedOriginal = rawUrl;
-    }
-  }
-
   const primaryHost = 'p3-novel.byteimg.com';
 
   return {
-    originalUrl: signedOriginal || `https://${primaryHost}/${folder}/${hash}~noop.image${qs}`,
-    hd2kUrl: signed2k || `https://${primaryHost}/${folder}/${hash}~tplv-resize:1600:0.image${qs}`,
-    hd1200Url: signed1200 || `https://${primaryHost}/${folder}/${hash}~tplv-resize:1200:0.image${qs}`,
+    originalUrl: `https://${primaryHost}/${folder}/${hash}~noop.image${qs}`,
+    hd2kUrl: `https://${primaryHost}/${folder}/${hash}~tplv-resize:1600:0.image${qs}`,
+    hd1200Url: `https://${primaryHost}/${folder}/${hash}~tplv-resize:1200:0.image${qs}`,
     pngUrl: `https://${primaryHost}/origin/${folder}/${hash}.png${qs}`,
     rawUrl: rawUrl || undefined
   };
 }
 
-export async function extractFanqieHdCover(input: string, bookNameHint?: string, authorHint?: string) {
+async function probeImageUrl(url: string): Promise<boolean> {
+  if (!url) return false;
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://fanqienovel.com/'
+      },
+      signal: AbortSignal.timeout(2500)
+    });
+    const ct = res.headers.get('content-type') || '';
+    return res.ok && ct.startsWith('image/');
+  } catch {
+    return false;
+  }
+}
+
+export async function extractFanqieHdCover(input: string, bookNameHint?: string, authorHint?: string, bookIdHint?: string) {
   if (!input || typeof input !== 'string') {
     throw new Error('Vui lòng cung cấp link ảnh bìa, ID truyện hoặc link truyện');
   }
@@ -1702,20 +1707,24 @@ export async function extractFanqieHdCover(input: string, bookNameHint?: string,
   // Case 1: Direct cover URL or hash
   let parsed = parseFanqieCoverFromUrl(trimmed);
 
-  // Case 2: If input is a book ID or link to book page
-  if (!parsed || parsed.hash === 'direct') {
-    const bookId = parseBookId(trimmed);
-    if (bookId) {
-      try {
-        const info = await getBookInfo(bookId);
-        if (info && info.cover_url) {
-          const p = parseFanqieCoverFromUrl(info.cover_url);
-          if (p) parsed = p;
-          bookName = info.title || bookName;
-          author = info.author || author;
-        }
-      } catch (e) {}
-    }
+  // Case 2: If input is a book ID or link to book page, OR if we have bookIdHint for a small signed resize thumbnail
+  const resolvedBookId = parseBookId(trimmed) || (bookIdHint ? parseBookId(bookIdHint) : '');
+  const looksLikeSmallSignedThumb = Boolean(
+    parsed?.rawUrl &&
+    parsed.rawUrl.includes('reading-sign') &&
+    /resize:(?:[1-4]\d\d|\d{1,2}):/i.test(parsed.rawUrl)
+  );
+
+  if ((!parsed || parsed.hash === 'direct' || looksLikeSmallSignedThumb) && resolvedBookId) {
+    try {
+      const info = await getBookInfo(resolvedBookId);
+      if (info && info.cover_url) {
+        const p = parseFanqieCoverFromUrl(info.cover_url);
+        if (p) parsed = p;
+        bookName = info.title || bookName;
+        author = info.author || author;
+      }
+    } catch (e) {}
   }
 
   if (!parsed) {
@@ -1723,6 +1732,36 @@ export async function extractFanqieHdCover(input: string, bookNameHint?: string,
   }
 
   const urls = buildHdCoverUrls(parsed.folder, parsed.hash, parsed.rawUrl, parsed.queryStr);
+
+  // Verify whether unsigned byteimg URLs actually work (folders like novel-pic-r require signed URLs)
+  if (parsed.hash !== 'direct' && parsed.folder !== 'qimao') {
+    const [origOk, pngOk] = await Promise.all([
+      probeImageUrl(urls.originalUrl),
+      probeImageUrl(urls.pngUrl)
+    ]);
+
+    if (!origOk && parsed.rawUrl) {
+      // Try alternate unsigned folder/host before falling back to intact signed rawUrl
+      const altOriginal = `https://p3-novel.byteimg.com/novel-pic/${parsed.hash}~noop.image`;
+      const alt2k = `https://p3-novel.byteimg.com/novel-pic/${parsed.hash}~tplv-resize:1600:0.image`;
+      const alt1200 = `https://p3-novel.byteimg.com/novel-pic/${parsed.hash}~tplv-resize:1200:0.image`;
+      const altPng = `https://p3-novel.byteimg.com/origin/novel-pic/${parsed.hash}.png`;
+
+      if (await probeImageUrl(altOriginal)) {
+        urls.originalUrl = altOriginal;
+        urls.hd2kUrl = alt2k;
+        urls.hd1200Url = alt1200;
+        urls.pngUrl = (await probeImageUrl(altPng)) ? altPng : altOriginal;
+      } else {
+        urls.originalUrl = parsed.rawUrl;
+        urls.hd2kUrl = parsed.rawUrl;
+        urls.hd1200Url = parsed.rawUrl;
+        urls.pngUrl = parsed.rawUrl;
+      }
+    } else if (origOk && !pngOk) {
+      urls.pngUrl = urls.originalUrl;
+    }
+  }
 
   return {
     success: true,

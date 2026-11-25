@@ -107,12 +107,13 @@ async function startServer() {
       const input = String(req.query.input || req.query.url || req.query.id || "").trim();
       const bookName = String(req.query.bookName || "").trim();
       const author = String(req.query.author || "").trim();
+      const bookId = String(req.query.bookId || "").trim();
 
       if (!input) {
         return res.status(400).json({ success: false, error: "Thiếu link ảnh bìa, ID truyện hoặc link truyện" });
       }
 
-      const coverData = await extractFanqieHdCover(input, bookName, author);
+      const coverData = await extractFanqieHdCover(input, bookName, author, bookId);
       res.json({ success: true, cover: coverData });
     } catch (err: any) {
       console.error("Cover extract error:", err);
@@ -120,29 +121,55 @@ async function startServer() {
     }
   });
 
+  function detectImageFormat(buf: Buffer): { ext: string; mime: string } | null {
+    if (buf.length < 12) return null;
+    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+      return { ext: "jpg", mime: "image/jpeg" };
+    }
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+      return { ext: "png", mime: "image/png" };
+    }
+    if (buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP") {
+      return { ext: "webp", mime: "image/webp" };
+    }
+    if (buf.subarray(0, 4).toString("ascii") === "GIF8") {
+      return { ext: "gif", mime: "image/gif" };
+    }
+    if (buf.subarray(4, 8).toString("ascii") === "ftyp") {
+      const brand = buf.subarray(8, 12).toString("ascii").toLowerCase();
+      if (brand.startsWith("avif") || brand.startsWith("avis")) {
+        return { ext: "avif", mime: "image/avif" };
+      }
+      if (brand.startsWith("heic") || brand.startsWith("heix") || brand.startsWith("mif1")) {
+        return { ext: "heic", mime: "image/heic" };
+      }
+    }
+    return null;
+  }
+
   // Helper to fetch novel cover image buffer across multiple CDNs & referers
-  async function fetchCoverBufferWithFallback(targetUrl: string, hash?: string, folder?: string): Promise<{ buffer: Buffer; contentType: string } | null> {
+  async function fetchCoverBufferWithFallback(targetUrl: string, hash?: string, folder?: string, rawUrl?: string): Promise<{ buffer: Buffer; contentType: string; ext: string } | null> {
     const candidateUrls: string[] = [targetUrl];
-    
+
     if (hash && hash !== 'direct') {
       const f = folder || 'novel-pic-r';
       candidateUrls.push(
+        `https://p3-novel.byteimg.com/${f}/${hash}~noop.image`,
         `https://p3-novel.byteimg.com/${f}/${hash}~tplv-resize:1600:0.image`,
         `https://p6-novel.byteimg.com/${f}/${hash}~tplv-resize:1600:0.image`,
-        `https://p3-novel.byteimg.com/${f}/${hash}~noop.image`,
-        `https://p3-novel.byteimg.com/origin/${f}/${hash}`,
-        `https://p3-novel.byteimg.com/novel-pic-r/${hash}~tplv-resize:1600:0.image`,
+        `https://p3-novel.byteimg.com/novel-pic/${hash}~noop.image`,
         `https://p3-novel.byteimg.com/novel-pic/${hash}~tplv-resize:1600:0.image`,
-        `https://p3-novel.byteimg.com/tos-cn-i-qvj2lq49zg/${hash}~tplv-resize:1600:0.image`,
-        `https://p3-novel.byteimg.com/novel-pic-r/${hash}~tplv-resize:225:300.image`
+        `https://p3-novel.byteimg.com/origin/${f}/${hash}`
       );
+    }
+
+    if (rawUrl) {
+      candidateUrls.push(rawUrl);
     }
 
     const uniqueCandidates = Array.from(new Set(candidateUrls.filter(Boolean)));
     const referers = [
       "https://fanqienovel.com/",
-      "https://www.qimao.com/",
-      "https://novel.snssdk.com/",
       ""
     ];
 
@@ -151,22 +178,33 @@ async function startServer() {
         try {
           const headers: Record<string, string> = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+            "Accept": "image/jpeg,image/png,*/*;q=0.8"
           };
           if (referer) {
             headers["Referer"] = referer;
           }
 
           const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 6000);
+          const timer = setTimeout(() => controller.abort(), 5000);
           const imgRes = await fetch(url, { headers, signal: controller.signal });
           clearTimeout(timer);
 
           if (imgRes.ok) {
+            const ct = imgRes.headers.get("content-type") || "";
+            if (ct && !ct.startsWith("image/") && !ct.includes("octet-stream")) {
+              continue;
+            }
             const buf = Buffer.from(await imgRes.arrayBuffer());
             if (buf.length > 500) {
-              const ct = imgRes.headers.get("content-type") || "image/jpeg";
-              return { buffer: buf, contentType: ct };
+              const detected = detectImageFormat(buf);
+              if (!detected && !ct.startsWith("image/")) {
+                continue;
+              }
+              return {
+                buffer: buf,
+                contentType: detected?.mime || ct || "image/jpeg",
+                ext: detected?.ext || (ct.includes("png") ? "png" : ct.includes("webp") ? "webp" : "jpg")
+              };
             }
           }
         } catch (e) {}
@@ -182,12 +220,13 @@ async function startServer() {
       const targetUrl = String(req.query.url || "").trim();
       const hash = String(req.query.hash || "").trim();
       const folder = String(req.query.folder || "").trim();
+      const rawUrl = String(req.query.rawUrl || "").trim();
 
-      if (!targetUrl && !hash) {
+      if (!targetUrl && !hash && !rawUrl) {
         return res.status(400).send("Thiếu thông tin ảnh bìa");
       }
 
-      const result = await fetchCoverBufferWithFallback(targetUrl, hash, folder);
+      const result = await fetchCoverBufferWithFallback(targetUrl, hash, folder, rawUrl);
       if (!result) {
         return res.status(404).send("Không thể tải ảnh bìa từ các máy chủ CDN");
       }
@@ -206,22 +245,25 @@ async function startServer() {
   app.get("/api/book/cover/download", async (req, res) => {
     try {
       const targetUrl = String(req.query.url || "").trim();
-      const filename = String(req.query.filename || "Bia_Truyen_HD.jpg").trim();
+      const requestedFilename = String(req.query.filename || "Bia_Truyen_HD.jpg").trim();
       const hash = String(req.query.hash || "").trim();
       const folder = String(req.query.folder || "").trim();
+      const rawUrl = String(req.query.rawUrl || "").trim();
 
-      if (!targetUrl && !hash) {
+      if (!targetUrl && !hash && !rawUrl) {
         return res.status(400).json({ success: false, error: "Thiếu link ảnh hợp lệ" });
       }
 
-      const result = await fetchCoverBufferWithFallback(targetUrl, hash, folder);
+      const result = await fetchCoverBufferWithFallback(targetUrl, hash, folder, rawUrl);
       if (!result) {
         return res.status(500).json({ success: false, error: "Không thể tải ảnh từ máy chủ" });
       }
 
-      const contentType = result.contentType || (filename.endsWith(".png") ? "image/png" : "image/jpeg");
-      res.setHeader("Content-Type", contentType);
-      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+      const baseName = requestedFilename.replace(/\.(jpg|jpeg|png|webp|avif|heic|gif)$/i, "") || "Bia_Truyen_HD";
+      const safeFilename = `${baseName}.${result.ext}`;
+      const asciiFallback = safeFilename.replace(/[^\x20-\x7E]/g, "_").replace(/"/g, "");
+      res.setHeader("Content-Type", result.contentType);
+      res.setHeader("Content-Disposition", `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(safeFilename)}`);
       res.setHeader("Content-Length", result.buffer.length);
       res.setHeader("Cache-Control", "public, max-age=86400");
       res.send(result.buffer);

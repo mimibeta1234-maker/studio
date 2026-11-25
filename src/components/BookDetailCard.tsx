@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BookOpen, User, List, Bookmark, FileSearch, BookmarkCheck, ChevronDown, ChevronUp, Image as ImageIcon, FileText } from 'lucide-react';
+import { BookOpen, User, List, Bookmark, FileSearch, BookmarkCheck, ChevronDown, ChevronUp, Image as ImageIcon, FileText, ExternalLink } from 'lucide-react';
 import { Book } from '../types';
 import { getAbstractParagraphs } from '../utils/textFormatter';
 import { HdCoverModal } from './HdCoverModal';
@@ -238,6 +238,21 @@ export const BookDetailCard: React.FC<BookDetailCardProps> = ({
               <ImageIcon className="w-3.5 h-3.5 text-amber-200" />
               <span>Trích xuất Bìa HD</span>
             </button>
+
+            {/* Open Original Fanqie Page */}
+            {book.book_id && (
+              <a
+                href={`https://fanqienovel.com/page/${encodeURIComponent(book.book_id)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 bg-white hover:bg-stone-100 text-stone-700 rounded-lg text-xs font-medium transition-colors border border-stone-200 flex items-center gap-1.5 cursor-pointer"
+                id="btn-open-fanqie-original"
+                title="Mở trang gốc của truyện trên Fanqie"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-stone-500" />
+                <span>Link gốc Fanqie</span>
+              </a>
+            )}
           </div>
         </div>
       </div>
@@ -249,6 +264,7 @@ export const BookDetailCard: React.FC<BookDetailCardProps> = ({
         initialCoverUrl={book.thumb_url}
         initialBookName={book.book_name}
         initialAuthor={book.author}
+        initialBookId={book.book_id}
       />
     </div>
   );

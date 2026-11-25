@@ -22,6 +22,7 @@ interface HdCoverModalProps {
   initialCoverUrl?: string;
   initialBookName?: string;
   initialAuthor?: string;
+  initialBookId?: string;
 }
 
 type CoverQuality = 'original' | 'hd2k' | 'hd1200' | 'png';
@@ -31,7 +32,8 @@ export const HdCoverModal: React.FC<HdCoverModalProps> = ({
   onClose,
   initialCoverUrl,
   initialBookName,
-  initialAuthor
+  initialAuthor,
+  initialBookId
 }) => {
   const [inputQuery, setInputQuery] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
@@ -44,7 +46,7 @@ export const HdCoverModal: React.FC<HdCoverModalProps> = ({
   const [downloading, setDownloading] = useState<boolean>(false);
 
   // Extract cover function
-  const extractCover = async (input: string, name?: string, author?: string) => {
+  const extractCover = async (input: string, name?: string, author?: string, bookId?: string) => {
     if (!input.trim()) return;
     setLoading(true);
     setErrorMessage(null);
@@ -52,7 +54,8 @@ export const HdCoverModal: React.FC<HdCoverModalProps> = ({
       const params = new URLSearchParams({
         input: input.trim(),
         bookName: name || '',
-        author: author || ''
+        author: author || '',
+        bookId: bookId || initialBookId || ''
       });
       const res = await fetch(`/api/book/cover/extract?${params.toString()}`);
       const data = await res.json();
@@ -73,14 +76,17 @@ export const HdCoverModal: React.FC<HdCoverModalProps> = ({
     if (isOpen) {
       if (initialCoverUrl) {
         setInputQuery(initialCoverUrl);
-        extractCover(initialCoverUrl, initialBookName, initialAuthor);
+        extractCover(initialCoverUrl, initialBookName, initialAuthor, initialBookId);
+      } else if (initialBookId) {
+        setInputQuery(initialBookId);
+        extractCover(initialBookId, initialBookName, initialAuthor, initialBookId);
       } else {
         setCoverData(null);
         setErrorMessage(null);
         setInputQuery('');
       }
     }
-  }, [isOpen, initialCoverUrl, initialBookName, initialAuthor]);
+  }, [isOpen, initialCoverUrl, initialBookName, initialAuthor, initialBookId]);
 
   if (!isOpen) return null;
 
@@ -105,7 +111,7 @@ export const HdCoverModal: React.FC<HdCoverModalProps> = ({
 
   const getProxyUrl = (targetUrl: string): string => {
     if (!targetUrl) return '';
-    return `/api/book/cover/proxy?url=${encodeURIComponent(targetUrl)}&hash=${encodeURIComponent(coverData?.hash || '')}&folder=${encodeURIComponent(coverData?.folder || '')}`;
+    return `/api/book/cover/proxy?url=${encodeURIComponent(targetUrl)}&hash=${encodeURIComponent(coverData?.hash || '')}&folder=${encodeURIComponent(coverData?.folder || '')}&rawUrl=${encodeURIComponent(coverData?.rawUrl || '')}`;
   };
 
   const handleCopyLink = async () => {
@@ -122,26 +128,112 @@ export const HdCoverModal: React.FC<HdCoverModalProps> = ({
   const handleDownload = async () => {
     if (!currentUrl) return;
     setDownloading(true);
+    setErrorMessage(null);
     try {
-      const safeTitle = (coverData?.bookName || initialBookName || 'Fanqie')
-        .replace(/[^a-zA-Z0-9À-ỹ\s_-]/g, '')
-        .trim()
-        .replace(/\s+/g, '_');
-      const ext = selectedQuality === 'png' ? 'png' : 'jpg';
-      const filename = `Bia_${safeTitle}_${selectedQuality.toUpperCase()}.${ext}`;
+      const rawTitle = (coverData?.bookName || initialBookName || 'Fanqie').trim();
+      const safeTitle =
+        rawTitle
+          .replace(/[\\/:*?"<>|\u0000-\u001F]/g, '')
+          .trim()
+          .replace(/\s+/g, '_')
+          .slice(0, 80) || 'Fanqie';
 
-      const downloadUrl = `/api/book/cover/download?url=${encodeURIComponent(currentUrl)}&hash=${encodeURIComponent(coverData?.hash || '')}&folder=${encodeURIComponent(coverData?.folder || '')}&filename=${encodeURIComponent(filename)}`;
-      
+      const proxyUrl = getProxyUrl(currentUrl);
+      const res = await fetch(proxyUrl);
+      if (!res.ok) {
+        throw new Error('Không thể tải ảnh từ máy chủ CDN');
+      }
+
+      const sourceBlob = await res.blob();
+      if (!sourceBlob || sourceBlob.size < 100) {
+        throw new Error('Dữ liệu ảnh tải về không hợp lệ');
+      }
+
+      const mime = (sourceBlob.type || '').toLowerCase();
+      const wantPng = selectedQuality === 'png';
+      const needsCanvasConvert =
+        (wantPng && mime !== 'image/png') ||
+        (!wantPng && mime !== 'image/jpeg' && mime !== 'image/png');
+
+      let finalBlob: Blob = sourceBlob;
+      let ext = mime === 'image/png' ? 'png' : 'jpg';
+
+      if (needsCanvasConvert) {
+        const objectUrl = URL.createObjectURL(sourceBlob);
+        try {
+          const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const el = new Image();
+            el.onload = () => resolve(el);
+            el.onerror = () => reject(new Error('Không thể giải mã định dạng ảnh'));
+            el.src = objectUrl;
+          });
+
+          const width = img.naturalWidth || img.width;
+          const height = img.naturalHeight || img.height;
+          if (!width || !height) {
+            throw new Error('Kích thước ảnh không hợp lệ');
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            throw new Error('Trình duyệt không hỗ trợ xử lý ảnh canvas');
+          }
+
+          if (!wantPng) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, width, height);
+          }
+          ctx.drawImage(img, 0, 0, width, height);
+
+          const targetMime = wantPng ? 'image/png' : 'image/jpeg';
+          finalBlob = await new Promise<Blob>((resolve, reject) => {
+            canvas.toBlob(
+              (converted) => {
+                if (converted) resolve(converted);
+                else reject(new Error('Chuyển đổi định dạng ảnh thất bại'));
+              },
+              targetMime,
+              wantPng ? undefined : 0.96
+            );
+          });
+          ext = wantPng ? 'png' : 'jpg';
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+        }
+      }
+
+      const filename = `Bia_${safeTitle}_${selectedQuality.toUpperCase()}.${ext}`;
+      const downloadObjectUrl = URL.createObjectURL(finalBlob);
       const link = document.createElement('a');
-      link.href = downloadUrl;
+      link.href = downloadObjectUrl;
       link.download = filename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-    } catch (e) {
-      console.error(e);
+      setTimeout(() => URL.revokeObjectURL(downloadObjectUrl), 5000);
+    } catch (e: any) {
+      console.error('Canvas/blob download failed, falling back to direct download:', e);
+      const rawTitle = (coverData?.bookName || initialBookName || 'Fanqie').trim();
+      const safeTitle =
+        rawTitle
+          .replace(/[\\/:*?"<>|\u0000-\u001F]/g, '')
+          .trim()
+          .replace(/\s+/g, '_')
+          .slice(0, 80) || 'Fanqie';
+      const fallbackFilename = `Bia_${safeTitle}_${selectedQuality.toUpperCase()}.${selectedQuality === 'png' ? 'png' : 'jpg'}`;
+      const downloadUrl = `/api/book/cover/download?url=${encodeURIComponent(currentUrl)}&hash=${encodeURIComponent(coverData?.hash || '')}&folder=${encodeURIComponent(coverData?.folder || '')}&rawUrl=${encodeURIComponent(coverData?.rawUrl || '')}&filename=${encodeURIComponent(fallbackFilename)}`;
+
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = fallbackFilename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
     } finally {
-      setTimeout(() => setDownloading(false), 800);
+      setTimeout(() => setDownloading(false), 500);
     }
   };
 
@@ -376,11 +468,14 @@ export const HdCoverModal: React.FC<HdCoverModalProps> = ({
                     alt={coverData.bookName || 'Bìa HD'}
                     referrerPolicy="no-referrer"
                     onError={(e) => {
-                      // If proxy fails, try direct currentUrl then rawUrl
-                      if (e.currentTarget.src.includes('/api/book/cover/proxy') && currentUrl) {
-                        e.currentTarget.src = currentUrl;
-                      } else if (coverData.rawUrl && e.currentTarget.src !== coverData.rawUrl) {
-                        e.currentTarget.src = coverData.rawUrl;
+                      const img = e.currentTarget;
+                      if (img.dataset.fallbackStage === 'done') return;
+                      if (!img.dataset.fallbackStage && currentUrl && img.src.includes('/api/book/cover/proxy')) {
+                        img.dataset.fallbackStage = 'direct';
+                        img.src = currentUrl;
+                      } else if (coverData.rawUrl && img.src !== coverData.rawUrl) {
+                        img.dataset.fallbackStage = 'done';
+                        img.src = coverData.rawUrl;
                       }
                     }}
                     style={{ transform: `scale(${zoomLevel})` }}
@@ -426,7 +521,7 @@ export const HdCoverModal: React.FC<HdCoverModalProps> = ({
               <a
                 href={getProxyUrl(currentUrl)}
                 target="_blank"
-                rel="noreferrer"
+                rel="noopener noreferrer"
                 className="px-3 py-2 bg-white hover:bg-stone-100 text-stone-700 border border-stone-300 rounded-xl text-xs font-semibold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
                 title="Mở ảnh kích thước gốc trong tab mới"
               >
